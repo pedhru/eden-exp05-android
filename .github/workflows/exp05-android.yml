@@ -1,0 +1,56 @@
+name: Eden EXP05 Android
+
+on:
+  workflow_dispatch:
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android toolchain
+        run: |
+          sdkmanager \
+            "platforms;android-36" \
+            "build-tools;35.0.0" \
+            "build-tools;36.0.0" \
+            "cmake;3.31.5" \
+            "ndk;28.2.13676358"
+
+      - name: Generate Android debug keystore
+        run: |
+          keytool -genkeypair -noprompt -keystore src/android/app/debug.keystore -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname "CN=Android Debug,O=Android,C=US"
+
+      - name: Build EXP05 Mainline Debug
+        working-directory: src/android
+        run: |
+          chmod +x gradlew
+          ./gradlew copyMainlineDebugOutputs \
+            --no-daemon \
+            --max-workers=2 \
+            --console=plain
+
+      - name: Upload APK
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Eden-EXP05-Android
+          path: |
+            artifacts/
+            src/android/app/build/outputs/apk/
+          if-no-files-found: warn
