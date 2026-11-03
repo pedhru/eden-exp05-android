@@ -38,6 +38,12 @@ jobs:
             "cmake;3.31.5" \
             "ndk;28.2.13676358"
 
+      - name: Install Vulkan shader tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y glslang-tools
+          glslangValidator --version
+
       - name: Generate Android debug keystore
         run: |
           keytool -genkeypair -noprompt -keystore src/android/app/debug.keystore -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname "CN=Android Debug,O=Android,C=US"
