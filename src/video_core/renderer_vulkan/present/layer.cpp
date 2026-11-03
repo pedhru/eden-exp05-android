@@ -48,6 +48,8 @@ VkFormat GetFormat(const Tegra::FramebufferConfig& framebuffer) {
     case Service::android::PixelFormat::Rgba8888:
     case Service::android::PixelFormat::Rgbx8888:
         return VK_FORMAT_A8B8G8R8_UNORM_PACK32;
+    case Service::android::PixelFormat::Rgba1010102:
+        return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
     case Service::android::PixelFormat::Rgb565:
         return VK_FORMAT_R5G6B5_UNORM_PACK16;
     case Service::android::PixelFormat::Bgra8888:
