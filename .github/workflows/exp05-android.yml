@@ -54,6 +54,9 @@ jobs:
       - name: Test NX2 sparse texture rectangles (C++20)
         run: python3 tools/test_nx2_sparse_rects.py
 
+      - name: Test NX2 sparse bounds (C++20)
+        run: python3 tools/test_nx2_sparse_bounds.py
+
       - name: Build EXP05 Mainline Debug
         working-directory: src/android
         run: |
