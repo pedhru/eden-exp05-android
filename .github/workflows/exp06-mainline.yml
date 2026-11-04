@@ -1,0 +1,74 @@
+name: Eden EXP06 Mainline Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mainline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            glslang-tools build-essential \
+            pkg-config python3-venv
+          python3 -m venv .venv
+          .venv/bin/pip install \
+            cmake==3.31.6 ninja==1.13.0
+          sdkmanager \
+            "platforms;android-36" \
+            "ndk;28.2.13676358" \
+            "build-tools;35.0.0"
+
+      - name: Build Mainline Release
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_B64: ""
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/.venv/bin:$PATH"
+          export CMAKE_BUILD_PARALLEL_LEVEL=2
+          bash .ci/android/build.sh \
+            --target standard \
+            --build-type Release
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=$(find artifacts -maxdepth 1 \
+            -name '*mainline*release*.apk' \
+            -type f -print -quit)
+          test -n "$APK"
+          test -s "$APK"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" \
+            verify --verbose "$APK"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" \
+            dump badging "$APK" | head -n 5
+          sha256sum "$APK"
+
+      - name: Upload Mainline APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Eden-EXP06-Mainline-Release
+          path: artifacts/*mainline*release*.apk
+          if-no-files-found: error
