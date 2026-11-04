@@ -8,6 +8,7 @@
 
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 #include <boost/container/small_vector.hpp>
 
@@ -79,6 +80,21 @@ struct OverlapResult {
 [[nodiscard]] boost::container::small_vector<BufferImageCopy, 16> UnswizzleImageRows(
     Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const ImageInfo& info,
     std::span<const std::pair<u64, u64>> dirty_ranges, std::vector<u8>& output);
+
+/// Select host sparse tiles touched by mapped/written guest byte ranges. Each range is
+/// (byte offset from the guest image, length), not (begin, end).
+[[nodiscard]] std::vector<LevelRect> SparseTileRects(
+    const ImageInfo& info, std::span<const std::pair<u64, u64>> ranges, u32 tile_width,
+    u32 tile_height, s32 mip_tail_level);
+
+/// Bytes needed by UnswizzleImageRects, including 4-byte alignment between copies.
+[[nodiscard]] size_t UnswizzledRectsBytes(const ImageInfo& info,
+                                         std::span<const LevelRect> rects);
+
+/// Read only the GOB bands intersecting each sparse tile rectangle and upload those regions.
+[[nodiscard]] std::vector<BufferImageCopy> UnswizzleImageRects(
+    Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const ImageInfo& info,
+    std::span<const LevelRect> rects, std::span<u8> output);
 
 /// Rewrites `copies` (from UnswizzleImage) to the layout ConvertImage produces, without converting.
 void ConvertedLayout(const ImageInfo& info, std::span<BufferImageCopy> copies);

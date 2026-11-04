@@ -129,6 +129,8 @@ android {
     buildTypes {
         // Signed by release key, allowing for upload to Play Store.
         release {
+            // Experimental optimized build coexists with EXP04 and EXP05 Debug.
+            applicationIdSuffix = ".perf"
             signingConfig = if (keystoreFile != null) {
                 signingConfigs.getByName("release")
             } else {

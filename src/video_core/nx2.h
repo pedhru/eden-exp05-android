@@ -8,7 +8,9 @@
 #include <atomic>
 #include <cstdlib>
 #include <functional>
+#include <limits>
 #include <map>
+#include <ranges>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -141,6 +143,9 @@ inline void Nx2SetSparseBacking(Nx2SparseBackingHandler handler) {
 
 /// Widens the span that writes are checked against (a new lazily backed region).
 inline void Nx2AddSparseSpan(u64 gpu_address, u64 size) {
+    if (size == 0 || gpu_address > (std::numeric_limits<u64>::max)() - size) {
+        return;
+    }
     u64 low = g_nx2_sparse_low.load();
     while (gpu_address < low && !g_nx2_sparse_low.compare_exchange_weak(low, gpu_address)) {
     }
@@ -151,7 +156,8 @@ inline void Nx2AddSparseSpan(u64 gpu_address, u64 size) {
 }
 
 inline void Nx2BackSparseWrite(u64 gpu_address, u64 size) {
-    if (gpu_address + size <= g_nx2_sparse_low.load(std::memory_order_relaxed) ||
+    if (size == 0 || gpu_address > (std::numeric_limits<u64>::max)() - size ||
+        gpu_address + size <= g_nx2_sparse_low.load(std::memory_order_relaxed) ||
         gpu_address >= g_nx2_sparse_high.load(std::memory_order_relaxed)) [[likely]] {
         return;
     }
@@ -179,9 +185,14 @@ inline std::mutex g_nx2_sparse_state_mutex;
 inline std::map<u64, Nx2SparseRegionState> g_nx2_sparse_state;
 
 inline void Nx2SparseRegionCreated(u64 gpu_address, u64 size, u64 block_size) {
+    // Do not allow invalid guest ranges to create an unusable sparse region or divide by zero.
+    if (size == 0 || block_size == 0 ||
+        gpu_address > (std::numeric_limits<u64>::max)() - size) {
+        return;
+    }
+    const u64 blocks = size / block_size + u64{size % block_size != 0};
     std::scoped_lock lk{g_nx2_sparse_state_mutex};
-    g_nx2_sparse_state[gpu_address] = {size, block_size,
-                                       std::vector<bool>((size + block_size - 1) / block_size)};
+    g_nx2_sparse_state[gpu_address] = {size, block_size, std::vector<bool>(blocks), {}};
 }
 
 inline void Nx2SparseRegionDestroyed(u64 gpu_address) {
@@ -197,7 +208,8 @@ inline void Nx2ClearSparseRegions() {
 
 inline void Nx2SparseBlockWritten(u64 region_address, u64 block) {
     std::scoped_lock lk{g_nx2_sparse_state_mutex};
-    if (const auto it = g_nx2_sparse_state.find(region_address); it != g_nx2_sparse_state.end()) {
+    if (const auto it = g_nx2_sparse_state.find(region_address); it != g_nx2_sparse_state.end() &&
+        block < it->second.written.size()) {
         it->second.written[block] = true;
     }
 }
@@ -211,10 +223,16 @@ inline void Nx2SparseTilesMapped(u64 region_address, u64 offset, u64 size, bool 
         return;
     }
     auto& region = it->second;
-    if (region.mapped.empty()) {
-        region.mapped.resize((region.size + Nx2SparseTileSize - 1) / Nx2SparseTileSize);
+    if (offset >= region.size) {
+        return; // Entirely outside this sparse allocation.
     }
-    const u64 last = (std::min)((offset + size - 1) / Nx2SparseTileSize, u64{region.mapped.size() - 1});
+    const u64 length = (std::min)(size, region.size - offset);
+    if (region.mapped.empty()) {
+        const u64 tiles = region.size / Nx2SparseTileSize +
+                          u64{region.size % Nx2SparseTileSize != 0};
+        region.mapped.resize(tiles);
+    }
+    const u64 last = (offset + length - 1) / Nx2SparseTileSize;
     for (u64 tile = offset / Nx2SparseTileSize; tile <= last; ++tile) {
         region.mapped[tile] = mapped;
     }
@@ -232,20 +250,27 @@ inline std::vector<std::pair<u64, u64>> Nx2SparseDataRanges(u64 gpu_address, u64
     }
     --it;
     const auto& [start, region] = *it;
-    if (size == 0 || gpu_address + size > start + region.size) {
+    const u64 begin = gpu_address - start;
+    if (size == 0 || begin >= region.size || size > region.size - begin) {
         return ranges;
     }
     const bool by_tile = !region.mapped.empty();
     const u64 unit = by_tile ? Nx2SparseTileSize : region.block_size;
     const std::vector<bool>& present = by_tile ? region.mapped : region.written;
-    const u64 begin = gpu_address - start;
+    if (unit == 0 || present.empty()) {
+        return ranges;
+    }
     const u64 end = begin + size;
-    for (u64 index = begin / unit; index * unit < end && index < present.size(); ++index) {
+    for (u64 index = begin / unit; index < present.size(); ++index) {
+        const u64 unit_begin = index * unit;
+        if (unit_begin >= end) {
+            break;
+        }
         if (!present[index]) {
             continue;
         }
-        const u64 run_begin = (std::max)(index * unit, begin) - begin;
-        const u64 run_end = (std::min)((index + 1) * unit, end) - begin;
+        const u64 run_begin = (std::max)(unit_begin, begin) - begin;
+        const u64 run_end = unit_begin + (std::min)(unit, end - unit_begin) - begin;
         if (!ranges.empty() && ranges.back().first + ranges.back().second == run_begin) {
             ranges.back().second += run_end - run_begin;
         } else {
@@ -257,7 +282,8 @@ inline std::vector<std::pair<u64, u64>> Nx2SparseDataRanges(u64 gpu_address, u64
 
 /// True when [gpu_address, +size) lies in one sparse region.
 inline bool Nx2InSparseRegion(u64 gpu_address, u64 size) {
-    if (size == 0 || gpu_address + size <= g_nx2_sparse_low.load(std::memory_order_relaxed) ||
+    if (size == 0 || gpu_address > (std::numeric_limits<u64>::max)() - size ||
+        gpu_address + size <= g_nx2_sparse_low.load(std::memory_order_relaxed) ||
         gpu_address >= g_nx2_sparse_high.load(std::memory_order_relaxed)) [[likely]] {
         return false;
     }
@@ -267,25 +293,28 @@ inline bool Nx2InSparseRegion(u64 gpu_address, u64 size) {
         return false;
     }
     --it;
-    return gpu_address + size <= it->first + it->second.size;
+    const u64 offset = gpu_address - it->first;
+    return offset < it->second.size && size <= it->second.size - offset;
 }
 
 /// The GPU renders into [gpu_address, +size): count its blocks as written, so images made there
 /// later get memory (their contents live in the host image, not in guest memory).
 inline void Nx2SparseMarkWritten(u64 gpu_address, u64 size) {
-    if (size == 0 || gpu_address + size <= g_nx2_sparse_low.load(std::memory_order_relaxed) ||
+    if (size == 0 || gpu_address > (std::numeric_limits<u64>::max)() - size ||
+        gpu_address + size <= g_nx2_sparse_low.load(std::memory_order_relaxed) ||
         gpu_address >= g_nx2_sparse_high.load(std::memory_order_relaxed)) [[likely]] {
         return;
     }
     std::scoped_lock lk{g_nx2_sparse_state_mutex};
     for (auto& [start, region] : g_nx2_sparse_state) {
         const u64 end = start + region.size;
-        if (gpu_address >= end || gpu_address + size <= start) {
+        if (region.block_size == 0 || region.written.empty() || gpu_address >= end ||
+            gpu_address + size <= start) {
             continue;
         }
         const u64 first = ((std::max)(gpu_address, start) - start) / region.block_size;
         const u64 last = ((std::min)(gpu_address + size, end) - 1 - start) / region.block_size;
-        for (u64 block = first; block <= last; ++block) {
+        for (u64 block = first; block <= last && block < region.written.size(); ++block) {
             region.written[block] = true;
         }
     }
@@ -293,7 +322,8 @@ inline void Nx2SparseMarkWritten(u64 gpu_address, u64 size) {
 
 /// True when [gpu_address, +size) lies in one sparse region and none of it has been written.
 inline bool Nx2SparseUnwritten(u64 gpu_address, u64 size) {
-    if (size == 0 || gpu_address + size <= g_nx2_sparse_low.load(std::memory_order_relaxed) ||
+    if (size == 0 || gpu_address > (std::numeric_limits<u64>::max)() - size ||
+        gpu_address + size <= g_nx2_sparse_low.load(std::memory_order_relaxed) ||
         gpu_address >= g_nx2_sparse_high.load(std::memory_order_relaxed)) [[likely]] {
         return false;
     }
@@ -304,11 +334,15 @@ inline bool Nx2SparseUnwritten(u64 gpu_address, u64 size) {
     }
     --it;
     const auto& [start, region] = *it;
-    if (gpu_address + size > start + region.size) {
+    const u64 begin = gpu_address - start;
+    if (region.block_size == 0 || begin >= region.size || size > region.size - begin) {
         return false;
     }
-    const u64 last = (gpu_address + size - 1 - start) / region.block_size;
-    for (u64 block = (gpu_address - start) / region.block_size; block <= last; ++block) {
+    const u64 last = (begin + size - 1) / region.block_size;
+    if (last >= region.written.size()) {
+        return false;
+    }
+    for (u64 block = begin / region.block_size; block <= last; ++block) {
         if (region.written[block]) {
             return false;
         }

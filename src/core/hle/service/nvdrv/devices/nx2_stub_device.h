@@ -58,7 +58,7 @@ public:
 
     void MapAt(u64 gpu_address, u64 cpu_address, u64 size) {
         std::scoped_lock lk{mutex};
-        TrimMappings(gpu_address, size);
+        TrimMappings(mappings, gpu_address, size);
         mappings.push_back({gpu_address, cpu_address, size});
         for (auto& [owner, listener] : listeners) {
             listener.map(gpu_address, cpu_address, size);
@@ -68,7 +68,7 @@ public:
     // NormalUnmapGpuMemory4K, or destroying the memory: the GPU range stops reaching it.
     void Unmap(u64 gpu_address, u64 size) {
         std::scoped_lock lk{mutex};
-        TrimMappings(gpu_address, size);
+        TrimMappings(mappings, gpu_address, size);
         for (auto& [owner, listener] : listeners) {
             listener.unmap(gpu_address, size);
         }
@@ -95,6 +95,8 @@ public:
     // blocks get memory; unbacked blocks read zero.
     void CreateSparse(u64 gpu_address, u64 size) {
         std::scoped_lock lk{mutex};
+        // Recriação de região não pode preservar tiles da alocação anterior.
+        TrimMappings(sparse_tiles, gpu_address, size);
         sparse_regions[gpu_address] = size;
         for (auto& [owner, listener] : listeners) {
             if (listener.sparse) {
@@ -106,6 +108,7 @@ public:
     void DestroySparse(u64 gpu_address, u64 size) {
         std::scoped_lock lk{mutex};
         sparse_regions.erase(gpu_address);
+        TrimMappings(sparse_tiles, gpu_address, size);
         for (auto& [owner, listener] : listeners) {
             if (listener.sparse) {
                 listener.sparse(gpu_address, size, false);
@@ -114,7 +117,16 @@ public:
     }
 
     void BackSparse(u64 gpu_address, u64 cpu_address, u64 size) {
+        if (size == 0) {
+            return;
+        }
         std::scoped_lock lk{mutex};
+        // Guarda o estado para espaços GPU abertos depois do mapeamento do tile.
+        // cpu_address == 0 representa desmapeamento, e nunca deve ser reproduzido.
+        TrimMappings(sparse_tiles, gpu_address, size);
+        if (cpu_address != 0) {
+            sparse_tiles.push_back({gpu_address, cpu_address, size});
+        }
         for (auto& [owner, listener] : listeners) {
             if (listener.back) {
                 listener.back(gpu_address, cpu_address, size);
@@ -135,6 +147,12 @@ public:
         if (sparse_listener) {
             for (const auto& [gpu_address, size] : sparse_regions) {
                 sparse_listener(gpu_address, size, true);
+            }
+        }
+        // Primeiro cria as regiões, depois restaura seus blocos já mapeados.
+        if (back_listener) {
+            for (const auto& tile : sparse_tiles) {
+                back_listener(tile.gpu_address, tile.cpu_address, tile.size);
             }
         }
         listeners.insert_or_assign(owner, Listeners{std::move(listener), std::move(unmap_listener),
@@ -158,6 +176,7 @@ public:
         std::scoped_lock lk{mutex};
         mappings.clear();
         sparse_regions.clear();
+        sparse_tiles.clear();
     }
 
     // Device (SMMU) address of a CPU range an address space mapped; used to present images.
@@ -200,11 +219,11 @@ private:
     };
 
     // Drops [gpu_address, +size) from the recorded mappings, keeping the parts outside it.
-    void TrimMappings(u64 gpu_address, u64 size) {
+    static void TrimMappings(std::vector<Mapping>& target, u64 gpu_address, u64 size) {
         const u64 end = gpu_address + size;
         std::vector<Mapping> kept;
-        kept.reserve(mappings.size() + 1);
-        for (const auto& m : mappings) {
+        kept.reserve(target.size() + 1);
+        for (const auto& m : target) {
             const u64 m_end = m.gpu_address + m.size;
             if (m_end <= gpu_address || m.gpu_address >= end) {
                 kept.push_back(m);
@@ -217,11 +236,12 @@ private:
                 kept.push_back({end, m.cpu_address + (end - m.gpu_address), m_end - end});
             }
         }
-        mappings = std::move(kept);
+        target = std::move(kept);
     }
 
     std::mutex mutex;
     std::vector<Mapping> mappings;
+    std::vector<Mapping> sparse_tiles; ///< GPU tile -> CPU backing, replayed to new listeners
     std::map<u64, u64> sparse_regions; ///< GPU address -> size
     std::map<const void*, Listeners> listeners;
 };

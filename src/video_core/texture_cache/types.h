@@ -60,6 +60,16 @@ enum class RelaxedOptions : u32 {
 };
 DECLARE_ENUM_FLAG_OPERATORS(RelaxedOptions)
 
+/// One rectangle of a mip level of a sparse 2D image, in guest texels.
+/// (level, x, y, width, height); the Vulkan backend uses the same layout.
+struct LevelRect {
+    s32 level{};
+    u32 x{};
+    u32 y{};
+    u32 width{};
+    u32 height{};
+};
+
 struct Offset2D {
     constexpr auto operator<=>(const Offset2D&) const noexcept = default;
 
