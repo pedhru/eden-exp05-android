@@ -57,21 +57,19 @@ jobs:
       - name: Test NX2 sparse bounds (C++20)
         run: python3 tools/test_nx2_sparse_bounds.py
 
-      - name: Build EXP05 Mainline Debug
+      - name: Build EXP05 Mainline Release (optimized)
         working-directory: src/android
         run: |
           chmod +x gradlew
-          ./gradlew copyMainlineDebugOutputs \
+          ./gradlew assembleMainlineRelease \
             --no-daemon \
             --max-workers=2 \
             --console=plain
 
       - name: Upload APK
-        if: always()
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Eden-EXP05-Android
-          path: |
-            artifacts/
-            src/android/app/build/outputs/apk/
-          if-no-files-found: warn
+          name: Eden-EXP05-Performance-Release
+          path: src/android/app/build/outputs/apk/mainline/release/*.apk
+          if-no-files-found: error
