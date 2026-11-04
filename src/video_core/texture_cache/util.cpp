@@ -15,6 +15,10 @@
 #include <numeric>
 #include <optional>
 #include <span>
+#include <bit>
+#include <set>
+#include <tuple>
+#include <limits>
 #include <vector>
 
 #include "common/alignment.h"
@@ -1044,6 +1048,250 @@ boost::container::small_vector<BufferImageCopy, 16> UnswizzleImageRows(
             }
         }
         level_offset += level_sizes[level];
+    }
+    return copies;
+}
+
+namespace {
+
+// A block-linear mip is stored as horizontal GOB runs, one GOB column per block.
+// Each run is GOB_SIZE_Y << block.height rows high; its blocks are contiguous in
+// guest memory. This is the layout already used by UnswizzleImageRows.
+struct SparseLevelLayout {
+    u32 width;
+    u32 height;
+    u32 bytes_per_texel;
+    u32 gob_texels;
+    u32 block_height;
+    u32 rows_per_band;
+    u32 block_bytes;
+    u32 num_bands;
+    u32 blocks_per_band;
+    u32 band_bytes;
+};
+
+[[nodiscard]] std::optional<SparseLevelLayout> GetSparseLevelLayout(
+    const ImageInfo& info, u32 level, const LevelArray& level_sizes) {
+    if (info.type != ImageType::e2D || info.size.depth != 1 || info.block.depth != 0 ||
+        info.resources.layers != 1 || info.num_samples != 1 ||
+        DefaultBlockWidth(info.format) != 1 || DefaultBlockHeight(info.format) != 1) {
+        return std::nullopt;
+    }
+    const u32 bpp = BytesPerBlock(info.format);
+    if (bpp == 0 || bpp > GOB_SIZE_X || !std::has_single_bit(bpp)) {
+        return std::nullopt;
+    }
+    const Extent3D size = AdjustMipSize(info.size, static_cast<s32>(level));
+    const Extent3D blocks = AdjustTileSize(size, DefaultBlockSize(info.format));
+    const Extent3D gob_block =
+        AdjustMipBlockSize(blocks, info.block, level, info.resources.levels);
+    const u32 rows_per_band = GOB_SIZE_Y << gob_block.height;
+    const u32 block_bytes = GOB_SIZE << gob_block.height;
+    const u32 num_bands = Common::DivCeil(size.height, rows_per_band);
+    if (num_bands == 0 || level_sizes[level] % num_bands != 0) {
+        return std::nullopt;
+    }
+    const u32 band_bytes = level_sizes[level] / num_bands;
+    if (band_bytes == 0 || band_bytes % block_bytes != 0) {
+        return std::nullopt;
+    }
+    const u32 blocks_per_band = band_bytes / block_bytes;
+    const u32 gob_texels = GOB_SIZE_X / bpp;
+    if (blocks_per_band < Common::DivCeil(size.width, gob_texels)) {
+        return std::nullopt;
+    }
+    return SparseLevelLayout{size.width, size.height, bpp, gob_texels, gob_block.height,
+                             rows_per_band, block_bytes, num_bands, blocks_per_band, band_bytes};
+}
+
+[[nodiscard]] constexpr size_t AlignSparseCopy(size_t bytes) {
+    return (bytes + 3) & ~size_t{3};
+}
+
+} // Anonymous namespace
+
+std::vector<LevelRect> SparseTileRects(const ImageInfo& info,
+                                       std::span<const std::pair<u64, u64>> ranges,
+                                       u32 tile_width, u32 tile_height, s32 mip_tail_level) {
+    std::vector<LevelRect> rects;
+    if (ranges.empty() || tile_width == 0 || tile_height == 0 || info.resources.levels <= 0 ||
+        info.resources.levels > static_cast<s32>(MAX_MIP_LEVELS)) {
+        return rects;
+    }
+    const auto sizes = CalculateMipLevelSizes(info);
+    const auto offsets = CalculateMipLevelOffsets(info);
+    const u64 guest_size = CalculateGuestSizeInBytes(info);
+    // level, host tile row, host tile column. A set suppresses duplicate tiles when
+    // several guest blocks/ranges touch the same Vulkan sparse tile.
+    std::set<std::tuple<s32, u32, u32>> tiles;
+    std::vector<bool> tails(static_cast<size_t>(info.resources.levels), false);
+    for (s32 level = 0; level < info.resources.levels; ++level) {
+        const auto layout = GetSparseLevelLayout(info, static_cast<u32>(level), sizes);
+        if (!layout) {
+            LOG_WARNING(HW_GPU, "Sparse tile layout is unsupported at mip {}", level);
+            return {};
+        }
+        const u64 begin = offsets[level];
+        const u64 end = begin + sizes[level];
+        for (const auto& [offset, length] : ranges) {
+            if (length == 0 || offset >= guest_size) {
+                continue;
+            }
+            const u64 range_end = offset + (std::min)(length, guest_size - offset);
+            const u64 low = (std::max)(begin, offset);
+            const u64 high = (std::min)(end, range_end);
+            if (high <= low) {
+                continue;
+            }
+            if (level >= mip_tail_level) {
+                // The Vulkan mip tail has one backing allocation for all of this level.
+                tails[level] = true;
+                continue;
+            }
+            const u64 first = (low - begin) / layout->block_bytes;
+            const u64 last = (std::min)(
+                Common::DivCeil(high - begin, u64{layout->block_bytes}),
+                u64{layout->num_bands} * layout->blocks_per_band);
+            for (u64 index = first; index < last; ++index) {
+                const u32 band = static_cast<u32>(index / layout->blocks_per_band);
+                const u32 column = static_cast<u32>(index % layout->blocks_per_band);
+                const u64 x = u64{column} * layout->gob_texels;
+                const u64 y = u64{band} * layout->rows_per_band;
+                if (x >= layout->width || y >= layout->height) {
+                    continue; // Stride padding, not image data.
+                }
+                const u64 x_end = (std::min)(x + layout->gob_texels, u64{layout->width});
+                const u64 y_end = (std::min)(y + layout->rows_per_band, u64{layout->height});
+                for (u32 ty = static_cast<u32>(y / tile_height);
+                     ty <= (y_end - 1) / tile_height; ++ty) {
+                    for (u32 tx = static_cast<u32>(x / tile_width);
+                         tx <= (x_end - 1) / tile_width; ++tx) {
+                        tiles.emplace(level, ty, tx);
+                    }
+                }
+            }
+        }
+    }
+    // Merge consecutive tiles horizontally to reduce staging copies, without including
+    // unselected tiles between them.
+    auto it = tiles.begin();
+    while (it != tiles.end()) {
+        const auto [level, ty, first_tx] = *it;
+        u32 last_tx = first_tx;
+        ++it;
+        while (it != tiles.end() && std::get<0>(*it) == level &&
+               std::get<1>(*it) == ty && std::get<2>(*it) == last_tx + 1) {
+            last_tx = std::get<2>(*it);
+            ++it;
+        }
+        const auto size = AdjustMipSize(info.size, level);
+        const u64 x = u64{first_tx} * tile_width;
+        const u64 y = u64{ty} * tile_height;
+        const u64 x_end = (std::min)((u64{last_tx} + 1) * tile_width, u64{size.width});
+        const u64 y_end = (std::min)(y + tile_height, u64{size.height});
+        if (x < x_end && y < y_end) {
+            rects.push_back({level, static_cast<u32>(x), static_cast<u32>(y),
+                             static_cast<u32>(x_end - x), static_cast<u32>(y_end - y)});
+        }
+    }
+    for (s32 level = 0; level < info.resources.levels; ++level) {
+        if (tails[level]) {
+            const auto size = AdjustMipSize(info.size, level);
+            rects.push_back({level, 0, 0, size.width, size.height});
+        }
+    }
+    return rects;
+}
+
+size_t UnswizzledRectsBytes(const ImageInfo& info, std::span<const LevelRect> rects) {
+    const size_t bpp = BytesPerBlock(info.format);
+    size_t bytes = 0;
+    for (const LevelRect& rect : rects) {
+        if (rect.width == 0 || rect.height == 0 || bpp == 0 ||
+            size_t{rect.width} > (std::numeric_limits<size_t>::max)() / rect.height / bpp) {
+            return 0;
+        }
+        const size_t payload = size_t{rect.width} * rect.height * bpp;
+        if (bytes > (std::numeric_limits<size_t>::max)() - 3 ||
+            payload > (std::numeric_limits<size_t>::max)() - bytes - 3) {
+            return 0;
+        }
+        bytes += AlignSparseCopy(payload);
+    }
+    return bytes;
+}
+
+std::vector<BufferImageCopy> UnswizzleImageRects(Tegra::MemoryManager& gpu_memory,
+                                                GPUVAddr gpu_addr, const ImageInfo& info,
+                                                std::span<const LevelRect> rects,
+                                                std::span<u8> output) {
+    std::vector<BufferImageCopy> copies;
+    if (info.resources.levels <= 0 || info.resources.levels > static_cast<s32>(MAX_MIP_LEVELS) ||
+        output.size_bytes() < UnswizzledRectsBytes(info, rects)) {
+        return copies;
+    }
+    const auto sizes = CalculateMipLevelSizes(info);
+    const auto offsets = CalculateMipLevelOffsets(info);
+    std::vector<u8> gob_data;
+    std::vector<u8> linear_data;
+    size_t output_offset = 0;
+    copies.reserve(rects.size());
+    for (const LevelRect& rect : rects) {
+        if (rect.level < 0 || rect.level >= info.resources.levels || rect.width == 0 ||
+            rect.height == 0) {
+            return {};
+        }
+        const auto layout = GetSparseLevelLayout(info, static_cast<u32>(rect.level), sizes);
+        if (!layout || rect.x >= layout->width || rect.y >= layout->height ||
+            rect.width > layout->width - rect.x || rect.height > layout->height - rect.y) {
+            return {};
+        }
+        const u32 first_block = rect.x / layout->gob_texels;
+        const u32 last_block = Common::DivCeil(rect.x + rect.width, layout->gob_texels);
+        if (last_block > layout->blocks_per_band) {
+            return {};
+        }
+        const u32 block_count = last_block - first_block;
+        const u32 run_width = block_count * layout->gob_texels;
+        const u32 run_x = first_block * layout->gob_texels;
+        const u32 stride_alignment = GOB_SIZE_X_SHIFT - std::countr_zero(layout->bytes_per_texel);
+        const u32 last_y = rect.y + rect.height;
+        for (u32 band = rect.y / layout->rows_per_band;
+             band <= (last_y - 1) / layout->rows_per_band; ++band) {
+            const u32 band_y = band * layout->rows_per_band;
+            const u32 band_height =
+                (std::min)(layout->rows_per_band, layout->height - band_y);
+            const size_t guest_bytes = size_t{block_count} * layout->block_bytes;
+            const size_t linear_bytes = size_t{run_width} * band_height * layout->bytes_per_texel;
+            gob_data.resize(guest_bytes);
+            linear_data.resize(linear_bytes);
+            const u64 guest_offset = offsets[rect.level] + u64{band} * layout->band_bytes +
+                                     u64{first_block} * layout->block_bytes;
+            gpu_memory.ReadBlockUnsafe(gpu_addr + guest_offset, gob_data.data(), guest_bytes);
+            Tegra::Texture::UnswizzleTexture(linear_data, gob_data, layout->bytes_per_texel,
+                                             run_width, band_height, 1, layout->block_height, 0,
+                                             stride_alignment, gpu_memory.UsesNativeTiling());
+            const u32 first_y = (std::max)(rect.y, band_y);
+            const u32 end_y = (std::min)(last_y, band_y + band_height);
+            const size_t row_bytes = size_t{rect.width} * layout->bytes_per_texel;
+            for (u32 y = first_y; y < end_y; ++y) {
+                const size_t src =
+                    (size_t{y - band_y} * run_width + rect.x - run_x) * layout->bytes_per_texel;
+                const size_t dst = output_offset + size_t{y - rect.y} * row_bytes;
+                std::memcpy(output.data() + dst, linear_data.data() + src, row_bytes);
+            }
+        }
+        const size_t payload = size_t{rect.width} * rect.height * layout->bytes_per_texel;
+        copies.push_back(BufferImageCopy{
+            .buffer_offset = output_offset,
+            .buffer_size = payload,
+            .buffer_row_length = rect.width,
+            .buffer_image_height = rect.height,
+            .image_subresource = {.base_level = rect.level, .base_layer = 0, .num_layers = 1},
+            .image_offset = {static_cast<s32>(rect.x), static_cast<s32>(rect.y), 0},
+            .image_extent = {rect.width, rect.height, 1},
+        });
+        output_offset += AlignSparseCopy(payload);
     }
     return copies;
 }

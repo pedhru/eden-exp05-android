@@ -1523,14 +1523,31 @@ void TextureCache<P>::RefreshSparseTiles(Image& image) {
         const std::vector<LevelRect> rects =
             SparseTileRects(image.info, ranges, image.SparseTileWidth(), image.SparseTileHeight(),
                             image.SparseTailLevel());
-        if (rects.empty() || !BindSparseTiles(image, rects)) {
+        if (rects.empty()) {
+            runtime.TransitionImageLayout(image);
+            return;
+        }
+        if (!BindSparseTiles(image, rects)) {
+            image.dirty_ranges.insert(image.dirty_ranges.end(), ranges.begin(), ranges.end());
             runtime.TransitionImageLayout(image);
             return;
         }
         const size_t bytes = UnswizzledRectsBytes(image.info, rects);
+        if (bytes == 0) {
+            LOG_ERROR(HW_GPU, "Sparse texture {:#x}: invalid staging size", image.gpu_addr);
+            image.dirty_ranges.insert(image.dirty_ranges.end(), ranges.begin(), ranges.end());
+            runtime.TransitionImageLayout(image);
+            return;
+        }
         auto staging = runtime.UploadStagingBuffer(bytes);
         const std::vector<BufferImageCopy> copies =
             UnswizzleImageRects(*gpu_memory, image.gpu_addr, image.info, rects, staging.mapped_span);
+        if (copies.size() != rects.size()) {
+            LOG_ERROR(HW_GPU, "Sparse texture {:#x}: failed to decode tile rectangles", image.gpu_addr);
+            image.dirty_ranges.insert(image.dirty_ranges.end(), ranges.begin(), ranges.end());
+            runtime.TransitionImageLayout(image);
+            return;
+        }
         image.UploadMemory(staging, copies);
         runtime.InsertUploadMemoryBarrier();
         ++images_uploaded;
