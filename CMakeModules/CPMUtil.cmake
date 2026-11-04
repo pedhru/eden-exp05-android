@@ -1051,7 +1051,7 @@ function(AddCIPackage)
             "${CMAKE_CURRENT_BINARY_DIR}/.cpmutil_${ARTIFACT}_sha512sum")
 
         file(DOWNLOAD "${sha512sum_url}" "${sha512sum_file}"
-            STATUS sha512sum_status)
+            STATUS sha512sum_status TIMEOUT 120 INACTIVITY_TIMEOUT 30 TLS_VERIFY ON)
         list(GET sha512sum_status 0 sha512sum_error)
 
         if(sha512sum_error)

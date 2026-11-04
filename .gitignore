@@ -67,23 +67,3 @@ vulkansdk*.exe
 
 # Build-time generated external sources
 externals/generated
-
-# Android e Gradle
-.gradle/
-.cxx/
-build/
-local.properties
-*.apk
-*.aab
-*.log
-artifacts/
-
-# Arquivos temporários
-__pycache__/
-*.pyc
-
-# Chaves de assinatura Android
-*.keystore
-*.jks
-*.p12
-*.pem

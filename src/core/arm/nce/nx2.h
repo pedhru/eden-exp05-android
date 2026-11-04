@@ -81,6 +81,16 @@ constexpr std::uint32_t AddOffset(unsigned rd, unsigned rn, std::int64_t offset)
 // Match the JIT's unsigned-pointer, zero-allocation-tag model without using host PAC/MTE.
 constexpr Nx2Patch GetNx2Patch(std::uint32_t word) {
     using namespace Nx2Detail;
+    // Reject opcode families that contain none of the NX2 adaptations below.
+    switch (word >> 24) {
+    case 0x38: case 0x78: case 0xb8: case 0xf8:
+    case 0xda: case 0x9a: case 0xd6: case 0xd7:
+    case 0xd5: case 0xd9: case 0x68: case 0x69:
+    case 0x91: case 0xd1:
+        break;
+    default:
+        return {};
+    }
     const auto rd = word & 31;
     const auto rn = (word >> 5) & 31;
     constexpr auto nop = 0xd503201fU;

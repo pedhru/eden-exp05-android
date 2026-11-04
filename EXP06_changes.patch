@@ -1,0 +1,699 @@
+--- /dev/null
++++ b/.ci/android/build-exp06-actions.sh
+@@ -0,0 +1,22 @@
++#!/usr/bin/env bash
++set -euo pipefail
++root="$(cd "$(dirname "$0")/../.." && pwd)"
++cd "$root"
++: "${ANDROID_HOME:?Android SDK required}"
++ndk="$ANDROID_HOME/ndk/28.2.13676358"
++bt="$ANDROID_HOME/build-tools/35.0.0"
++mkdir -p artifacts/native artifacts/logs
++exec > >(tee artifacts/logs/build.log) 2>&1
++export ASAN_OPTIONS=detect_leaks=0
++bash .ci/android/test-exp06-host.sh
++python3 .ci/android/test-nx2-nce.py --clang "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
++bash .ci/android/build-nce-native.sh "$ndk" "$root/.venv" "$root/build-exp06"
++cp build-exp06/out/libyuzu-android.so artifacts/libyuzu-android-unstripped.so
++cp build-exp06/out/libyuzu-android.so artifacts/native/
++"$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-unneeded artifacts/native/libyuzu-android.so
++python3 .ci/android/repack-exp06.py --base ci-inputs/Eden_EXP04.apk --native artifacts/native --out artifacts/unsigned.apk
++"$bt/zipalign" -P 16 -f 4 artifacts/unsigned.apk artifacts/aligned.apk
++java -jar "$bt/lib/apksigner.jar" sign --ks src/android/app/debug.keystore --ks-key-alias androiddebugkey --ks-pass pass:android --key-pass pass:android --out artifacts/Eden_NX2_Android_EXP06.apk artifacts/aligned.apk
++python3 .ci/android/verify-exp06-apk.py --apk artifacts/Eden_NX2_Android_EXP06.apk --base ci-inputs/Eden_EXP04.apk --ndk "$ndk" --build-tools "$bt" --java "$(command -v java)" --report artifacts/APK_verification.json
++rm artifacts/unsigned.apk artifacts/aligned.apk
++(cd artifacts && sha256sum Eden_NX2_Android_EXP06.apk libyuzu-android-unstripped.so > SHA256SUMS.txt)
+--- a/.ci/android/build-nce-native.sh
++++ b/.ci/android/build-nce-native.sh
+@@ -15,4 +15,4 @@
+   -DBUILD_TESTING=OFF -DYUZU_TESTS=OFF -DDYNARMIC_TESTS=OFF \
+   -DENABLE_WERROR=OFF -DENABLE_UPDATE_CHECKER=OFF -DENABLE_LTO=OFF \
+   -DYUZU_DOWNLOAD_ANDROID_VVL=OFF -DEDEN_NX2_NO_ENV_FILE=ON
+-"$cmake_dir/bin/cmake" --build "$build_dir/build" --target yuzu-android --parallel 4
++"$cmake_dir/bin/cmake" --build "$build_dir/build" --target yuzu-android --parallel "${BUILD_JOBS:-2}"
+--- /dev/null
++++ b/.ci/android/exp06-tests/code_reader.cpp
+@@ -0,0 +1,18 @@
++#include <array>
++#include <cassert>
++#include <limits>
++#include "core/arm/nce/code_reader.h"
++int main() {
++    using namespace Core::NCE;
++    static_assert(IsValidCodeRange(16,4,12));
++    static_assert(!IsValidCodeRange(16,4,16));
++    static_assert(!IsValidCodeRange(16,1,4));
++    static_assert(!IsValidCodeRange(16,0,3));
++    static_assert(!IsValidCodeRange(16,std::numeric_limits<std::size_t>::max(),4));
++    std::array<std::uint8_t, 17> storage{};
++    std::span<std::uint8_t> bytes{storage.data()+1,16};
++    for (std::uint32_t i=0; i<100000; ++i) {
++        for (int k=0;k<4;++k) bytes[k]=(i>>(8*k))&255;
++        assert(ReadCodeWord(bytes,0)==i);
++    }
++}
+--- /dev/null
++++ b/.ci/android/exp06-tests/memory_budget.cpp
+@@ -0,0 +1,26 @@
++#include <cassert>
++#include <cstdint>
++#include <limits>
++#include "video_core/vulkan_common/android_memory_budget.h"
++int main() {
++    using Vulkan::AndroidDeviceMemoryBudget;
++    constexpr std::uint64_t G = 1ULL << 30;
++    static_assert(AndroidDeviceMemoryBudget(3*G, G, 12*G, false) == 7*G/4);
++    static_assert(AndroidDeviceMemoryBudget(G, 2*G, 12*G, false) == 0);
++    static_assert(AndroidDeviceMemoryBudget(0, 0, 0, false) == 0);
++    static_assert(AndroidDeviceMemoryBudget(12*G, 0, 12*G, false) == 4*G);
++    static_assert(AndroidDeviceMemoryBudget(12*G, 0, 12*G, true) == 6*G);
++    std::uint64_t state = 0x12345678;
++    auto random = [&] { state ^= state << 13; state ^= state >> 7; state ^= state << 17; return state; };
++    for (int i=0; i<1000000; ++i) {
++        auto b=random(), u=random(), c=random();
++        for (bool aggressive : {false, true}) {
++            auto result=AndroidDeviceMemoryBudget(b,u,c,aggressive);
++            assert(result <= (b > u ? b-u : 0));
++            assert(result <= c);
++            assert(result <= (aggressive ? 6 : 4)*G);
++        }
++    }
++    assert(AndroidDeviceMemoryBudget(std::numeric_limits<std::uint64_t>::max(),0,
++        std::numeric_limits<std::uint64_t>::max(),false)==4*G);
++}
+--- /dev/null
++++ b/.ci/android/repack-exp06.py
+@@ -0,0 +1,148 @@
++#!/usr/bin/env python3
++"""Package the rebuilt EXP06 native core with the supplied EXP04 frontend."""
++import argparse
++import hashlib
++from pathlib import Path
++import re
++import struct
++import zipfile
++
++
++BASE_SHA256 = '655571ffbf20ef6060c936867cca8e62eca354d967a7cd884a39211919c9b642'
++
++
++def u32(data, offset):
++    return struct.unpack_from('<I', data, offset)[0]
++
++
++def length(data, offset, utf8):
++    if utf8:
++        n = data[offset]
++        return (((n & 127) << 8) | data[offset + 1], offset + 2) if n & 128 else (n, offset + 1)
++    n = struct.unpack_from('<H', data, offset)[0]
++    return (((n & 32767) << 16) | struct.unpack_from('<H', data, offset + 2)[0], offset + 4) if n & 32768 else (n, offset + 2)
++
++
++def encode_length(n, utf8):
++    if utf8:
++        return bytes([(n >> 8) | 128, n & 255]) if n > 127 else bytes([n])
++    return struct.pack('<HH', (n >> 16) | 32768, n & 65535) if n > 32767 else struct.pack('<H', n)
++
++
++def patch_manifest(data):
++    kind, header_size, size = struct.unpack_from('<HHI', data)
++    assert kind == 3 and size == len(data)
++    chunks = []
++    offset = header_size
++    strings = None
++    pool_index = None
++    while offset < len(data):
++        chunk_kind, chunk_header, chunk_size = struct.unpack_from('<HHI', data, offset)
++        assert chunk_size >= chunk_header >= 8 and offset + chunk_size <= len(data)
++        chunk = bytearray(data[offset:offset + chunk_size])
++        if chunk_kind == 1:
++            assert strings is None
++            count, style_count, flags, start, style_start = struct.unpack_from('<IIIII', chunk, 8)
++            utf8 = bool(flags & 256)
++            offsets = struct.unpack_from('<' + 'I' * count, chunk, chunk_header)
++            strings = []
++            for rel in offsets:
++                n, pos = length(chunk, start + rel, utf8)
++                if utf8:
++                    n, pos = length(chunk, pos, True)
++                    strings.append(bytes(chunk[pos:pos + n]).decode('utf-8'))
++                else:
++                    strings.append(bytes(chunk[pos:pos + n * 2]).decode('utf-16-le'))
++            pool_index = len(chunks)
++        chunks.append(chunk)
++        offset += chunk_size
++    assert strings is not None
++    new_strings = ['nx2-nce-exp06-sx2a-0.3.0', 'Eden SX2A NCE EXP06']
++    version_name, label = len(strings), len(strings) + 1
++    strings += new_strings
++    changed = set()
++    for chunk in chunks:
++        kind, chunk_header, _ = struct.unpack_from('<HHI', chunk)
++        if kind != 0x102:
++            continue
++        element = strings[u32(chunk, chunk_header + 4)]
++        attr_start, attr_size, attr_count = struct.unpack_from('<HHH', chunk, chunk_header + 8)
++        assert attr_size >= 20
++        for i in range(attr_count):
++            pos = chunk_header + attr_start + i * attr_size
++            name = strings[u32(chunk, pos + 4)]
++            if element == 'manifest' and name == 'package':
++                assert strings[u32(chunk, pos + 8)] == 'dev.eden.nx2'
++            if element == 'manifest' and name == 'versionCode':
++                old = u32(chunk, pos + 16)
++                assert old == 34192005
++                struct.pack_into('<I', chunk, pos + 8, 0xffffffff)
++                chunk[pos + 15] = 0x10
++                struct.pack_into('<I', chunk, pos + 16, 34192007)
++                changed.add(name)
++            elif (element == 'manifest' and name == 'versionName') or (element == 'application' and name == 'label'):
++                value = version_name if name == 'versionName' else label
++                struct.pack_into('<I', chunk, pos + 8, value)
++                chunk[pos + 15] = 3
++                struct.pack_into('<I', chunk, pos + 16, value)
++                changed.add(name)
++    assert changed == {'versionCode', 'versionName', 'label'}
++    old = chunks[pool_index]
++    _, pool_header, _ = struct.unpack_from('<HHI', old)
++    count, style_count, flags, start, style_start = struct.unpack_from('<IIIII', old, 8)
++    utf8 = bool(flags & 256)
++    style_offsets = old[pool_header + count * 4:pool_header + (count + style_count) * 4]
++    styles = old[style_start:] if style_start else b''
++    payload = bytearray()
++    offsets = []
++    for s in strings:
++        offsets.append(len(payload))
++        encoded = s.encode('utf-8' if utf8 else 'utf-16-le')
++        units = len(s.encode('utf-16-le')) // 2
++        payload += encode_length(units, utf8)
++        if utf8:
++            payload += encode_length(len(encoded), True)
++        payload += encoded + (b'\0' if utf8 else b'\0\0')
++    payload += b'\0' * (-len(payload) % 4)
++    start = pool_header + len(strings) * 4 + len(style_offsets)
++    new_pool = bytearray(old[:pool_header])
++    # Appending strings invalidates the sorted-string flag, but preserves all existing indices.
++    struct.pack_into('<IIIII', new_pool, 8, len(strings), style_count, flags & ~1,
++                     start, start + len(payload) if styles else 0)
++    new_pool += struct.pack('<' + 'I' * len(offsets), *offsets) + style_offsets + payload + styles
++    struct.pack_into('<I', new_pool, 4, len(new_pool))
++    chunks[pool_index] = new_pool
++    result = bytearray(data[:header_size]) + b''.join(chunks)
++    struct.pack_into('<I', result, 4, len(result))
++    return result
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument('--base', type=Path, required=True)
++    parser.add_argument('--native', type=Path, required=True)
++    parser.add_argument('--out', type=Path, required=True)
++    args = parser.parse_args()
++    assert hashlib.sha256(args.base.read_bytes()).hexdigest() == BASE_SHA256
++    core = (args.native / 'libyuzu-android.so').read_bytes()
++    assert b'Unsupported NX2 NCE instruction' in core and b'NX2 CPU backend:' in core
++    args.out.parent.mkdir(parents=True, exist_ok=True)
++    with zipfile.ZipFile(args.base) as source, zipfile.ZipFile(args.out, 'w', allowZip64=False) as target:
++        assert source.testzip() is None
++        for item in source.infolist():
++            if re.fullmatch(r'META-INF/(MANIFEST.MF|[^/]+\.(SF|RSA|DSA|EC))', item.filename, re.I):
++                continue
++            data = source.read(item)
++            if item.filename == 'AndroidManifest.xml':
++                data = patch_manifest(data)
++            elif item.filename == 'lib/arm64-v8a/libyuzu-android.so':
++                data = core
++            elif item.filename.startswith('lib/arm64-v8a/') and (args.native / Path(item.filename).name).is_file():
++                data = (args.native / Path(item.filename).name).read_bytes()
++            item.extra = b''
++            target.writestr(item, data)
++    print(args.out)
++
++
++if __name__ == '__main__':
++    main()
+--- /dev/null
++++ b/.ci/android/test-exp06-host.sh
+@@ -0,0 +1,13 @@
++#!/usr/bin/env bash
++set -euo pipefail
++root="$(cd "$(dirname "$0")/../.." && pwd)"
++cd "$root"
++temp="$(mktemp -d)"
++trap 'rm -rf "$temp"' EXIT
++export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}"
++for test in .ci/android/exp06-tests/*.cpp .ci/android/exp05-tests/nce_filter.cpp .ci/android/exp05-tests/pool_cleanup.cpp; do
++    name="$(basename "$test" .cpp)"
++    g++ -std=c++23 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -pthread -Isrc "$test" -o "$temp/$name"
++    "$temp/$name"
++    echo "PASS $name"
++done
+--- /dev/null
++++ b/.ci/android/verify-exp06-apk.py
+@@ -0,0 +1,113 @@
++#!/usr/bin/env python3
++"""Verify the signed experimental APK and its JNI/dependency compatibility."""
++import argparse
++import hashlib
++import json
++from pathlib import Path
++import re
++import struct
++import subprocess
++import tempfile
++import zipfile
++
++
++def run(args):
++    return subprocess.check_output([str(a) for a in args], text=True)
++
++
++def verify_elf(data):
++    h = struct.unpack_from('<16sHHIQQQIHHHHHH', data)
++    assert h[0][:6] == b'\x7fELF\x02\x01' and h[2] == 183
++    assert h[6] + h[11] * h[12] <= len(data)
++    assert h[5] + h[9] * h[10] <= len(data)
++    for i in range(h[10]):
++        ph = struct.unpack_from('<IIQQQQQQ', data, h[5] + h[9] * i)
++        assert ph[2] + ph[5] <= len(data)
++        if ph[0] == 1:
++            assert ph[7] >= 0x4000
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument('--apk', type=Path, required=True)
++    p.add_argument('--base', type=Path, required=True)
++    p.add_argument('--ndk', type=Path, required=True)
++    p.add_argument('--build-tools', type=Path, required=True)
++    p.add_argument('--java', type=Path, required=True)
++    p.add_argument('--report', type=Path, required=True)
++    args = p.parse_args()
++    tools = args.ndk / 'toolchains/llvm/prebuilt/linux-x86_64'
++    signing = run([args.java, '-jar', args.build_tools / 'lib/apksigner.jar',
++                   'verify', '--verbose', '--print-certs', args.apk])
++    assert 'Verified using v3 scheme (APK Signature Scheme v3): true' in signing
++    assert '9d09b2001be0dde93ea0444c536b72270fab3eb1a2fccfd56e1a3c46cc0d7af1' in signing
++    run([args.build_tools / 'zipalign', '-c', '-P', '16', '4', args.apk])
++    badging = run([args.build_tools / 'aapt2', 'dump', 'badging', args.apk])
++    assert "name='dev.eden.nx2'" in badging
++    assert "versionCode='34192007'" in badging
++    assert "versionName='nx2-nce-exp06-sx2a-0.3.0'" in badging
++    assert "minSdkVersion:'33'" in badging
++    assert "application-label:'Eden SX2A NCE EXP06'" in badging
++    assert "native-code: 'arm64-v8a'" in badging
++    native = []
++    needed = {}
++    with zipfile.ZipFile(args.apk) as apk, zipfile.ZipFile(args.base) as base, tempfile.TemporaryDirectory(prefix='verify-nce-') as temp:
++        temp = Path(temp)
++        assert apk.testzip() is None
++        assert not any('/.' in n for n in apk.namelist())
++        native = [n for n in apk.namelist() if n.startswith('lib/') and n.endswith('.so')]
++        packaged = {Path(n).name for n in native}
++        for name in native:
++            assert name.startswith('lib/arm64-v8a/')
++            data = apk.read(name)
++            verify_elf(data)
++            path = temp / Path(name).name
++            path.write_bytes(data)
++            deps = re.findall(r'Shared library: \[(.*?)\]', run([tools / 'bin/llvm-readelf', '-d', path]))
++            for dep in deps:
++                assert dep in packaged or (tools / 'sysroot/usr/lib/aarch64-linux-android/33' / dep).exists(), dep
++            needed[Path(name).name] = deps
++        name = 'lib/arm64-v8a/libyuzu-android.so'
++        core = apk.read(name)
++        assert core != base.read(name)
++        assert b'NX2 CPU backend:' in core
++        assert b'Unsupported NX2 NCE instruction' in core
++        original = temp / 'original.so'
++        original.write_bytes(base.read(name))
++        def jni(path):
++            return set(re.findall(r'\b(Java_\w+)', run([tools / 'bin/llvm-nm', '-D', '--defined-only', path])))
++        old_exports = jni(original)
++        new_exports = jni(temp / 'libyuzu-android.so')
++        assert old_exports and old_exports <= new_exports, sorted(old_exports - new_exports)
++        for name in base.namelist():
++            if name.endswith('.dex'):
++                assert apk.read(name) == base.read(name)
++            if name.startswith('assets/') or name.startswith('res/') or name == 'resources.arsc':
++                assert apk.read(name) == base.read(name), name
++    report = {
++        'apk': args.apk.name,
++        'sha256': hashlib.sha256(args.apk.read_bytes()).hexdigest(),
++        'bytes': args.apk.stat().st_size,
++        'package': 'dev.eden.nx2',
++        'version_code': 34192007,
++        'version': 'nx2-nce-exp06-sx2a-0.3.0',
++        'minimum_android_api': 33,
++        'native_abi': 'arm64-v8a',
++        'jni_exports_preserved': len(old_exports),
++        'native_libraries': native,
++        'dependencies': needed,
++        'signature_v3_verified': True,
++        'zipalign_16k_verified': True,
++        'elf_16k_alignment_verified': True,
++        'crc_verified': True,
++        'frontend_dex_unchanged': True,
++        'resources_and_bundled_drivers_unchanged': True,
++        'nce_core_changed_and_markers_present': True,
++        'phone_or_game_runtime_tested': False,
++    }
++    args.report.write_text(json.dumps(report, indent=2) + '\n')
++    print(json.dumps(report, indent=2))
++
++
++if __name__ == '__main__':
++    main()
+--- /dev/null
++++ b/.github/workflows/exp06-android.yml
+@@ -0,0 +1,46 @@
++name: Eden EXP06 Android ARM64
++on:
++  workflow_dispatch:
++permissions:
++  contents: read
++jobs:
++  build:
++    runs-on: ubuntu-24.04
++    timeout-minutes: 180
++    env:
++      BUILD_JOBS: '2'
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/setup-java@v4
++        with:
++          distribution: temurin
++          java-version: '17'
++      - name: Install host dependencies and pinned toolchain
++        shell: bash
++        run: |
++          sudo apt-get update
++          sudo apt-get install -y glslang-tools build-essential pkg-config python3-venv
++          python3 -m venv .venv
++          .venv/bin/pip install cmake==3.31.6 ninja==1.13.0
++          sdkmanager 'ndk;28.2.13676358' 'build-tools;35.0.0'
++      - name: Build, package and verify
++        run: bash .ci/android/build-exp06-actions.sh
++      - name: Upload APK and verification
++        uses: actions/upload-artifact@v4
++        with:
++          name: Eden-EXP06-ARM64
++          path: |
++            artifacts/Eden_NX2_Android_EXP06.apk
++            artifacts/APK_verification.json
++            artifacts/SHA256SUMS.txt
++            artifacts/libyuzu-android-unstripped.so
++          if-no-files-found: error
++      - name: Upload diagnostics even on failure
++        if: always()
++        uses: actions/upload-artifact@v4
++        with:
++          name: Eden-EXP06-build-logs
++          path: |
++            artifacts/logs/
++            build-exp06/build/CMakeFiles/CMakeConfigureLog.yaml
++          if-no-files-found: ignore
+--- a/CMakeModules/CPMUtil.cmake
++++ b/CMakeModules/CPMUtil.cmake
+@@ -1051,7 +1051,7 @@
+             "${CMAKE_CURRENT_BINARY_DIR}/.cpmutil_${ARTIFACT}_sha512sum")
+ 
+         file(DOWNLOAD "${sha512sum_url}" "${sha512sum_file}"
+-            STATUS sha512sum_status)
++            STATUS sha512sum_status TIMEOUT 120 INACTIVITY_TIMEOUT 30 TLS_VERIFY ON)
+         list(GET sha512sum_status 0 sha512sum_error)
+ 
+         if(sha512sum_error)
+--- /dev/null
++++ b/LEIA-ME_EXP06.md
+@@ -0,0 +1,46 @@
++# Eden NX2 EXP06 — fontes experimentais para Android ARM64
++
++Base: fontes da EXP05 compilada anteriormente, derivada da EXP04 fornecida pelo usuário.
++Alvo: Motorola Edge 20 Pro, Snapdragon 870, Adreno 650, Android 13/API 33.
++Data: 04/11/2026. Alterações assistidas por ChatGPT; revisão humana necessária antes de contribuição upstream. Licenças originais preservadas.
++
++## Alterações desta entrega
++
++- NCE: validação do intervalo de código antes de modificar o estado do patcher; checagem por subtração evita overflow. Leitura de instruções com memcpy elimina dependência de alinhamento e aliasing no scanner. Não altera semântica das instruções PAC/MTE existentes.
++- NSO: substitui repetição ilimitada de PatchText por uma única nova tentativa com patcher separado. Se também falhar, retorna erro de carregamento em vez de continuar criando patchers.
++- NRO: não prossegue para relocação quando PatchText retorna falha.
++- Vulkan/Android: orçamento inicial da GPU integrada usa subtração saturada de uso, limite da capacidade local e reserva de 1/8 (máximo 1 GiB), com teto de 4/6 GiB conforme modo. Impede que capacidade física seja usada como piso acima do orçamento livre. Caminho desktop preservado. É uma política experimental: pode aumentar descarte/recompilação de cache em aparelhos sob pressão; comparar frametime e uso de memória.
++- Shaders: reutiliza os pools por thread também na reconstrução de pipelines gráficos do cache em disco, liberando blocos extras ao terminar cada tarefa. Mantém a reutilização de runtime da EXP05. Não muda a ordem de desenhos nem oculta shaders que falham.
++- Build: timeout de 120 s e de inatividade de 30 s no download do checksum CPM, mantendo verificação TLS e hashes. Não remove o acesso à rede nem corrige indisponibilidade do servidor.
++- Workflow manual para APK ARM64, relatório de verificação, símbolos e logs. Dois jobs de compilação por padrão para reduzir pressão de RAM.
++
++## Como usar no GitHub Actions
++
++1. Extraia este ZIP e coloque TODO seu conteúdo na raiz do repositório que você escolher, incluindo `.github`, `.ci`, `CMakeLists.txt`, `src`, `externals` e `ci-inputs`. Não coloque o ZIP inteiro nem uma pasta extra no lugar do projeto.
++2. Faça o commit por sua conta. Este trabalho não criou repositório, commit, PR nem push.
++3. Abra Actions → Eden EXP06 Android ARM64 → Run workflow.
++4. Depois de passar a compilação e verificação, baixe o artifact `Eden-EXP06-ARM64`. Os logs são enviados mesmo se a compilação falhar.
++
++O workflow baixa dependências públicas descritas pelo próprio projeto. Precisa de acesso a esses servidores e de um runner Ubuntu 24.04 com SDK Android (padrão do GitHub hospedado). Usa NDK 28.2.13676358, CMake 3.31.6, Ninja 1.13.0, JDK 17 e Build Tools 35.0.0. Não depende de repositório pessoal externo. Referências: https://github.com/android/ndk/releases e https://docs.github.com/en/actions/tutorials/store-and-share-data .
++
++Incluído `ci-inputs/Eden_EXP04.apk` como base da interface. O workflow recompila a biblioteca nativa, reaproveita DEX/recursos/drivers da EXP04, atualiza versão para EXP06 (34192007), alinha e assina com a chave de teste já presente no projeto. NÃO é uma reconstrução Gradle da interface Java/Kotlin. A base é verificada por SHA256; não substitua esse APK por outro sem adaptar os verificadores. Não há chaves de jogos, firmware ou ROMs neste pacote.
++
++A assinatura é de desenvolvimento, compatível com a EXP04 fornecida. Não é uma chave privada de produção. Caso uma instalação existente tenha outro certificado, a atualização poderá ser recusada; preserve seus dados antes de qualquer reinstalação.
++
++## Validação realmente executada
++
++- Testes C++ de leitura de código: limites, overflow de intervalo e 100.000 leituras em armazenamento desalinhado.
++- Política de memória: casos de orçamento exaurido/zero, tetos e 1.000.000 triplas aleatórias em dois modos (2.000.000 avaliações).
++- Filtro NCE herdado: 2.204.288 comparações com referência EXP04.
++- ObjectPool: reuso, limite exato, crescimento, destrutores, limpeza sem alocação e duas threads.
++- Acima executados em host x86_64 com ASan/UBSan; LeakSanitizer desativado no ambiente.
++- Scripts Python compilados; Bash validado com bash -n; YAML parseado; patch diferencial e integridade ZIP verificados.
++- Testes locais não compilam as unidades completas patcher.cpp, nso.cpp, nro.cpp ou vulkan_device.cpp. A integração Android e os testes NCE com assembler LLVM são passos do Actions ainda NÃO executados nesta entrega.
++
++## Limites e continuidade no outro chat
++
++Não há APK EXP06 previamente compilado neste ZIP. O APK em ci-inputs é EXP04, apenas entrada de empacotamento. Não há medição no celular nem confirmação de ganho de FPS, correção do céu preto ou dos crashes de Pokopia. Não adicionamos novos serviços Switch 2 nem novas instruções suportadas. Vulkan 1.4 não é anunciado artificialmente.
++
++O orçamento da GPU é uma estimativa inicial, não a memória livre total do Android. Um orçamento zero continua seguindo o tratamento existente de ausência de orçamento nos consumidores; não há uma política nova de recuperação de OOM. O céu preto precisa de reprodução vinculada ao driver efetivamente carregado, extensões e shaders envolvidos.
++
++Para o outro chat: use este pacote como base, leia EXP06_changes.patch e VALIDATION/host-tests.log, execute o workflow primeiro e corrija eventuais erros reais de integração. Não declare suporte Switch 2 ou desempenho por compilar. Compare EXP05 e EXP06 no mesmo driver, configuração, cena e temperatura, com cache frio e quente separados. Colete backtrace simbolizado usando a biblioteca não removida de símbolos do artifact. Priorize quaisquer regressões antes de novas otimizações.
+--- a/src/android/app/src/main/jni/native.cpp
++++ b/src/android/app/src/main/jni/native.cpp
+@@ -1410,7 +1410,7 @@
+ }
+ 
+ void Java_org_yuzu_yuzu_1emu_NativeLibrary_logDeviceInfo(JNIEnv* env, jclass clazz) {
+-    LOG_INFO(Frontend, "Android port build: nx2-nce-exp05-sx2a-0.3.0");
++    LOG_INFO(Frontend, "Android port build: nx2-nce-exp06-sx2a-0.3.0");
+     LOG_INFO(Frontend, "eden Version: {}-{}", Common::g_scm_branch, Common::g_scm_desc);
+     LOG_INFO(Frontend, "Host OS: Android API level {}", android_get_device_api_level());
+ }
+@@ -2002,7 +2002,7 @@
+ JNIEXPORT jstring JNICALL Java_org_yuzu_yuzu_1emu_NativeLibrary_getBuildVersion(
+         JNIEnv* env,
+         [[maybe_unused]] jobject obj) {
+-    return env->NewStringUTF("nx2-nce-exp05-sx2a-0.3.0");
++    return env->NewStringUTF("nx2-nce-exp06-sx2a-0.3.0");
+ }
+ 
+ JNIEXPORT jobjectArray JNICALL Java_org_yuzu_yuzu_1emu_NativeLibrary_getAllUsers(
+--- /dev/null
++++ b/src/core/arm/nce/code_reader.h
+@@ -0,0 +1,19 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#pragma once
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++#include <span>
++
++namespace Core::NCE {
++constexpr bool IsValidCodeRange(std::size_t image_size, std::size_t offset, std::size_t size) {
++    return offset <= image_size && size <= image_size - offset &&
++           offset % sizeof(std::uint32_t) == 0 && size % sizeof(std::uint32_t) == 0;
++}
++// Caller supplies a complete instruction; memcpy also supports unaligned byte storage.
++inline std::uint32_t ReadCodeWord(std::span<const std::uint8_t> text, std::size_t index) {
++    std::uint32_t word;
++    std::memcpy(&word, text.data() + index * sizeof(word), sizeof(word));
++    return word;
++}
++} // namespace Core::NCE
+--- a/src/core/arm/nce/patcher.cpp
++++ b/src/core/arm/nce/patcher.cpp
+@@ -10,6 +10,7 @@
+ #include "core/arm/nce/guest_context.h"
+ #include "core/arm/nce/instructions.h"
+ #include "core/arm/nce/nx2.h"
++#include "core/arm/nce/code_reader.h"
+ #include "core/arm/nce/patcher.h"
+ #include "core/core.h"
+ #include "core/core_timing.h"
+@@ -58,18 +59,19 @@
+     }
+     modules.emplace_back();
+     curr_patch = &modules.back();
+-    const auto words = std::span<const u32>{reinterpret_cast<const u32*>(text.data()), text.size() / sizeof(u32)};
+-    for (u32 i = ModuleCodeIndex; i < static_cast<u32>(words.size()); ++i) {
++    const size_t word_count = text.size() / sizeof(u32);
++    for (size_t i = ModuleCodeIndex; i < word_count; ++i) {
++        const u32 instruction = ReadCodeWord(text, i);
+         const uintptr_t offset = i * sizeof(u32);
+-        if (m_is_nx2 && PatchNx2Instruction(words[i], offset, false)) {
++        if (m_is_nx2 && PatchNx2Instruction(instruction, offset, false)) {
+             continue;
+         }
+-        if (auto svc = SVC{words[i]}; m_is_nx2 && svc.Verify()) {
++        if (auto svc = SVC{instruction}; m_is_nx2 && svc.Verify()) {
+             BranchToPatch(offset);
+             WriteSvcTrampoline(offset + sizeof(u32), svc.GetValue());
+             continue;
+         }
+-        if (auto mrs = MRS{words[i]}; m_is_nx2 && mrs.Verify() && mrs.GetRt() != 31 &&
++        if (auto mrs = MRS{instruction}; m_is_nx2 && mrs.Verify() && mrs.GetRt() != 31 &&
+             (mrs.GetSystemReg() == CntpctEl0 || mrs.GetSystemReg() == CntfrqEl0)) {
+             BranchToPatch(offset);
+             const auto dest = oaknut::XReg{static_cast<int>(mrs.GetRt())};
+@@ -80,11 +82,11 @@
+             }
+             continue;
+         }
+-        if (auto mrs = MRS{words[i]}; mrs.Verify() && mrs.GetRt() != 31 && (mrs.GetSystemReg() == TpidrEl0 || mrs.GetSystemReg() == TpidrroEl0)) {
++        if (auto mrs = MRS{instruction}; mrs.Verify() && mrs.GetRt() != 31 && (mrs.GetSystemReg() == TpidrEl0 || mrs.GetSystemReg() == TpidrroEl0)) {
+             BranchToPatch(offset);
+             const auto src_reg = mrs.GetSystemReg() == TpidrroEl0 ? oaknut::SystemReg::TPIDRRO_EL0 : oaknut::SystemReg::TPIDR_EL0;
+             WriteMrsHandler(offset + sizeof(u32), oaknut::XReg{static_cast<int>(mrs.GetRt())}, src_reg);
+-        } else if (auto msr = MSR{words[i]}; msr.Verify() && msr.GetSystemReg() == TpidrEl0) {
++        } else if (auto msr = MSR{instruction}; msr.Verify() && msr.GetSystemReg() == TpidrEl0) {
+             BranchToPatch(offset);
+             WriteMsrHandler(offset + sizeof(u32), oaknut::XReg{static_cast<int>(msr.GetRt())});
+         }
+@@ -114,6 +116,9 @@
+ bool Patcher::PatchText(std::span<const u8> program_image, const Kernel::CodeSet::Segment& code) {
+     // If we have patched modules but cannot reach the new module, then it needs its own patcher.
+     const size_t image_size = program_image.size();
++    if (!IsValidCodeRange(image_size, code.offset, code.size)) {
++        return false;
++    }
+ 
+     // Check if we need split mode for large modules. A64 max takes 128MB
+     // tests showed that, with update, some are larger. (In this case 208MB)
+@@ -142,12 +147,11 @@
+ 
+     // Retrieve text segment data.
+     const auto text = std::span{program_image}.subspan(code.offset, code.size);
+-    const auto text_words =
+-        std::span<const u32>{reinterpret_cast<const u32*>(text.data()), text.size() / sizeof(u32)};
++    const size_t word_count = text.size() / sizeof(u32);
+ 
+     // Loop through instructions, patching as needed.
+-    for (u32 i = ModuleCodeIndex; i < static_cast<u32>(text_words.size()); i++) {
+-        const u32 inst = text_words[i];
++    for (size_t i = ModuleCodeIndex; i < word_count; i++) {
++        const u32 inst = ReadCodeWord(text, i);
+         const uintptr_t instruction_offset = i * sizeof(u32);
+         if (m_is_nx2 && PatchNx2Instruction(inst, instruction_offset,
+                                            use_split && instruction_offset < image_size / 2)) {
+--- a/src/core/loader/nro.cpp
++++ b/src/core/loader/nro.cpp
+@@ -249,7 +249,10 @@
+ 
+     if (Settings::IsNceEnabled()) {
+         // Patch SVCs and MRS calls in the guest code
+-        patch.PatchText(program_image, code);
++        if (!patch.PatchText(program_image, code)) {
++            LOG_ERROR(Loader, "NCE patching failed for NRO code segment");
++            return false;
++        }
+ 
+         // We only support PostData patching for NROs.
+         ASSERT(patch.GetPatchMode() == Core::NCE::PatchMode::PostData);
+--- a/src/core/loader/nso.cpp
++++ b/src/core/loader/nso.cpp
+@@ -227,10 +227,15 @@
+         //Set module ID using build_id from the NSO header
+         patch->SetModuleID(nso_header.build_id);
+         // Patch SVCs and MRS calls in the guest code
+-        while (!patch->PatchText(codeset.memory, code)) {
++        if (!patch->PatchText(codeset.memory, code)) {
+             const bool is_nx2 = patch->IsNx2();
+             patch = &patches->emplace_back(is_nx2);
+             patch->SetModuleID(nso_header.build_id);  // In case the patcher is changed for big modules, the new patcher should also have the build_id
++            if (!patch->PatchText(codeset.memory, code)) {
++                SetLastLoadError("NCE: invalid code segment or unreachable patch layout.");
++                LOG_ERROR(Loader, "NCE patching failed for NSO {}", nso_file.GetName());
++                return std::nullopt;
++            }
+         }
+     } else if (patch) {
+         // Relocate code patch and copy to the program image.
+--- a/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
++++ b/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
+@@ -759,7 +759,10 @@
+ 
+         workers.QueueWork([this, key, env_ = std::move(env), &state, &callback]() mutable {
+             const PipelineStats::ScopedRole stats_role{PipelineStats::Role::Boot};
+-            ShaderPools pools;
++            thread_local ShaderPools pools;
++            SCOPE_EXIT {
++                pools.ReleaseExtraChunks();
++            };
+             auto pipeline{CreateComputePipeline(pools, key, env_, state.statistics.get(), false)};
+             std::scoped_lock lock{state.mutex};
+             if (pipeline) {
+@@ -806,7 +809,10 @@
+ 
+         workers.QueueWork([this, key, envs_ = std::move(envs), &state, &callback]() mutable {
+             const PipelineStats::ScopedRole stats_role{PipelineStats::Role::Boot};
+-            ShaderPools pools;
++            thread_local ShaderPools pools;
++            SCOPE_EXIT {
++                pools.ReleaseExtraChunks();
++            };
+             boost::container::static_vector<Shader::Environment*, 5> env_ptrs;
+             for (auto& env : envs_) {
+                 env_ptrs.push_back(&env);
+--- /dev/null
++++ b/src/video_core/vulkan_common/android_memory_budget.h
+@@ -0,0 +1,19 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#pragma once
++
++#include <algorithm>
++#include <cstdint>
++
++namespace Vulkan {
++// Android shares physical memory with the CPU. Do not promote heap capacity to free budget.
++constexpr std::uint64_t AndroidDeviceMemoryBudget(std::uint64_t budget,
++                                                  std::uint64_t usage,
++                                                  std::uint64_t local_capacity,
++                                                  bool aggressive) {
++    constexpr std::uint64_t GiB = 1ULL << 30;
++    const auto available = budget > usage ? budget - usage : 0;
++    const auto usable = (std::min)(available, local_capacity);
++    const auto reserve = (std::min)(usable / 8, GiB);
++    return (std::min)(usable - reserve, (aggressive ? 6 : 4) * GiB);
++}
++} // namespace Vulkan
+--- a/src/video_core/vulkan_common/vulkan_device.cpp
++++ b/src/video_core/vulkan_common/vulkan_device.cpp
+@@ -29,6 +29,7 @@
+ #include "common/settings_enums.h"
+ #include "video_core/vulkan_common/nsight_aftermath_tracker.h"
+ #include "video_core/vulkan_common/vma.h"
++#include "video_core/vulkan_common/android_memory_budget.h"
+ #include "video_core/vulkan_common/vulkan_device.h"
+ #include "video_core/vulkan_common/vulkan_wrapper.h"
+ #include "video_core/gpu_logging/gpu_logging.h"
+@@ -1716,9 +1717,15 @@
+         device_access_memory += heap_size;
+     }
+     if (is_integrated) {
++#ifdef __ANDROID__
++        device_access_memory = AndroidDeviceMemoryBudget(
++            device_access_memory, device_initial_usage, local_memory,
++            Settings::values.vram_usage_mode.GetValue() == Settings::VramUsageMode::Aggressive);
++#else
+         const s64 available_memory = static_cast<s64>(device_access_memory - device_initial_usage);
+         const u64 memory_size = Settings::values.vram_usage_mode.GetValue() == Settings::VramUsageMode::Aggressive ? 6_GiB : 4_GiB;
+         device_access_memory = static_cast<u64>(std::max<s64>(std::min<s64>(available_memory - 8_GiB, memory_size), std::min<s64>(local_memory, memory_size)));
++#endif
+     } else {
+         const u64 reserve_memory = std::min<u64>(device_access_memory / 8, 1_GiB);
+         device_access_memory -= reserve_memory;

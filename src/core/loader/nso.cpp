@@ -227,10 +227,15 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
         //Set module ID using build_id from the NSO header
         patch->SetModuleID(nso_header.build_id);
         // Patch SVCs and MRS calls in the guest code
-        while (!patch->PatchText(codeset.memory, code)) {
+        if (!patch->PatchText(codeset.memory, code)) {
             const bool is_nx2 = patch->IsNx2();
             patch = &patches->emplace_back(is_nx2);
             patch->SetModuleID(nso_header.build_id);  // In case the patcher is changed for big modules, the new patcher should also have the build_id
+            if (!patch->PatchText(codeset.memory, code)) {
+                SetLastLoadError("NCE: invalid code segment or unreachable patch layout.");
+                LOG_ERROR(Loader, "NCE patching failed for NSO {}", nso_file.GetName());
+                return std::nullopt;
+            }
         }
     } else if (patch) {
         // Relocate code patch and copy to the program image.

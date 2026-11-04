@@ -210,8 +210,6 @@ PixelFormat PixelFormatFromGPUPixelFormat(Service::android::PixelFormat format) 
     case Service::android::PixelFormat::Rgba8888:
     case Service::android::PixelFormat::Rgbx8888:
         return PixelFormat::A8B8G8R8_UNORM;
-    case Service::android::PixelFormat::Rgba1010102:
-        return PixelFormat::A2B10G10R10_UNORM;
     case Service::android::PixelFormat::Rgb565:
         return PixelFormat::R5G6B5_UNORM;
     case Service::android::PixelFormat::Bgra8888:

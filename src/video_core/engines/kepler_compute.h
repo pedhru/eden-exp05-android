@@ -268,10 +268,6 @@ private:
     void ProcessNativeReportSemaphore(u32 argument);
     void DescribeNativeResources(const NativeQmdScheduler::Descriptor& qmd);
     bool UpscaleInsteadOfNativeProgram();
-    void RememberDlssMotionVectors();
-    std::optional<Texture::TICEntry> dlss_motion_vectors{};
-    GPUVAddr dlss_motion_color{};
-    std::array<f32, 2> dlss_jitter{};
     struct NativeImageReference {
         u32 binding; ///< Constant buffer holding the handle
         u32 offset;  ///< Handle's word offset in it

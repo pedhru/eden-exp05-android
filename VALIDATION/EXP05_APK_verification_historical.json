@@ -1,0 +1,86 @@
+{
+  "apk": "Eden_NX2_Android_EXP05.apk",
+  "sha256": "4a97d15132929f65f2225c535e1e8159d3ca9eeb448b8d41fcf53f945ec7114f",
+  "bytes": 33315836,
+  "package": "dev.eden.nx2",
+  "version_code": 34192006,
+  "version": "nx2-nce-exp05-sx2a-0.3.0",
+  "minimum_android_api": 33,
+  "native_abi": "arm64-v8a",
+  "jni_exports_preserved": 317,
+  "native_libraries": [
+    "lib/arm64-v8a/libVkLayer_khronos_validation.so",
+    "lib/arm64-v8a/libandroidx.graphics.path.so",
+    "lib/arm64-v8a/libfile_redirect_hook.so",
+    "lib/arm64-v8a/libgsl_alloc_hook.so",
+    "lib/arm64-v8a/libhook_impl.so",
+    "lib/arm64-v8a/libmain_hook.so",
+    "lib/arm64-v8a/libyuzu-android.so"
+  ],
+  "dependencies": {
+    "libVkLayer_khronos_validation.so": [
+      "libdl.so",
+      "liblog.so",
+      "libandroid.so",
+      "libm.so",
+      "libc.so"
+    ],
+    "libandroidx.graphics.path.so": [
+      "libm.so",
+      "libdl.so",
+      "libc.so"
+    ],
+    "libfile_redirect_hook.so": [
+      "libhook_impl.so",
+      "libandroid.so",
+      "libdl.so",
+      "liblog.so",
+      "libm.so",
+      "libc.so"
+    ],
+    "libgsl_alloc_hook.so": [
+      "libhook_impl.so",
+      "libandroid.so",
+      "libdl.so",
+      "liblog.so",
+      "libm.so",
+      "libc.so"
+    ],
+    "libhook_impl.so": [
+      "liblog.so",
+      "libandroid.so",
+      "libdl.so",
+      "libm.so",
+      "libc.so"
+    ],
+    "libmain_hook.so": [
+      "libhook_impl.so",
+      "libandroid.so",
+      "libdl.so",
+      "liblog.so",
+      "libm.so",
+      "libc.so"
+    ],
+    "libyuzu-android.so": [
+      "libcamera2ndk.so",
+      "libEGL.so",
+      "libjnigraphics.so",
+      "libGLESv2.so",
+      "libm.so",
+      "libOpenSLES.so",
+      "libdl.so",
+      "libmediandk.so",
+      "libandroid.so",
+      "liblog.so",
+      "libc.so"
+    ]
+  },
+  "signature_v3_verified": true,
+  "zipalign_16k_verified": true,
+  "elf_16k_alignment_verified": true,
+  "crc_verified": true,
+  "frontend_dex_unchanged": true,
+  "resources_and_bundled_drivers_unchanged": true,
+  "nce_core_changed_and_markers_present": true,
+  "phone_or_game_runtime_tested": false
+}

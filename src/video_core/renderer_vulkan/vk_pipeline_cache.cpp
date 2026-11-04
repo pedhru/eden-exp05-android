@@ -759,7 +759,10 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
 
         workers.QueueWork([this, key, env_ = std::move(env), &state, &callback]() mutable {
             const PipelineStats::ScopedRole stats_role{PipelineStats::Role::Boot};
-            ShaderPools pools;
+            thread_local ShaderPools pools;
+            SCOPE_EXIT {
+                pools.ReleaseExtraChunks();
+            };
             auto pipeline{CreateComputePipeline(pools, key, env_, state.statistics.get(), false)};
             std::scoped_lock lock{state.mutex};
             if (pipeline) {
@@ -806,7 +809,10 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
 
         workers.QueueWork([this, key, envs_ = std::move(envs), &state, &callback]() mutable {
             const PipelineStats::ScopedRole stats_role{PipelineStats::Role::Boot};
-            ShaderPools pools;
+            thread_local ShaderPools pools;
+            SCOPE_EXIT {
+                pools.ReleaseExtraChunks();
+            };
             boost::container::static_vector<Shader::Environment*, 5> env_ptrs;
             for (auto& env : envs_) {
                 env_ptrs.push_back(&env);
@@ -1451,7 +1457,10 @@ void PipelineCache::TranslateGraphicsPipeline(const GraphicsPipelineCacheKey& ke
                                               std::promise<void> done) {
     const PipelineStats::ScopedRole stats_role{PipelineStats::Role::Xlate};
     const auto begin = std::chrono::steady_clock::now();
-    ShaderPools pools;
+    thread_local ShaderPools pools;
+    SCOPE_EXIT {
+        pools.ReleaseExtraChunks();
+    };
     boost::container::static_vector<Shader::Environment*, Maxwell::MaxShaderProgram> env_ptrs;
     for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
         if (key.unique_hashes[index] != 0) {

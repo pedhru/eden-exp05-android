@@ -10,6 +10,7 @@
 #include "core/arm/nce/guest_context.h"
 #include "core/arm/nce/instructions.h"
 #include "core/arm/nce/nx2.h"
+#include "core/arm/nce/code_reader.h"
 #include "core/arm/nce/patcher.h"
 #include "core/core.h"
 #include "core/core_timing.h"
@@ -58,18 +59,19 @@ Patcher::Patcher(std::span<const u8> text, bool is_nx2)
     }
     modules.emplace_back();
     curr_patch = &modules.back();
-    const auto words = std::span<const u32>{reinterpret_cast<const u32*>(text.data()), text.size() / sizeof(u32)};
-    for (u32 i = ModuleCodeIndex; i < static_cast<u32>(words.size()); ++i) {
+    const size_t word_count = text.size() / sizeof(u32);
+    for (size_t i = ModuleCodeIndex; i < word_count; ++i) {
+        const u32 instruction = ReadCodeWord(text, i);
         const uintptr_t offset = i * sizeof(u32);
-        if (m_is_nx2 && PatchNx2Instruction(words[i], offset, false)) {
+        if (m_is_nx2 && PatchNx2Instruction(instruction, offset, false)) {
             continue;
         }
-        if (auto svc = SVC{words[i]}; m_is_nx2 && svc.Verify()) {
+        if (auto svc = SVC{instruction}; m_is_nx2 && svc.Verify()) {
             BranchToPatch(offset);
             WriteSvcTrampoline(offset + sizeof(u32), svc.GetValue());
             continue;
         }
-        if (auto mrs = MRS{words[i]}; m_is_nx2 && mrs.Verify() && mrs.GetRt() != 31 &&
+        if (auto mrs = MRS{instruction}; m_is_nx2 && mrs.Verify() && mrs.GetRt() != 31 &&
             (mrs.GetSystemReg() == CntpctEl0 || mrs.GetSystemReg() == CntfrqEl0)) {
             BranchToPatch(offset);
             const auto dest = oaknut::XReg{static_cast<int>(mrs.GetRt())};
@@ -80,11 +82,11 @@ Patcher::Patcher(std::span<const u8> text, bool is_nx2)
             }
             continue;
         }
-        if (auto mrs = MRS{words[i]}; mrs.Verify() && mrs.GetRt() != 31 && (mrs.GetSystemReg() == TpidrEl0 || mrs.GetSystemReg() == TpidrroEl0)) {
+        if (auto mrs = MRS{instruction}; mrs.Verify() && mrs.GetRt() != 31 && (mrs.GetSystemReg() == TpidrEl0 || mrs.GetSystemReg() == TpidrroEl0)) {
             BranchToPatch(offset);
             const auto src_reg = mrs.GetSystemReg() == TpidrroEl0 ? oaknut::SystemReg::TPIDRRO_EL0 : oaknut::SystemReg::TPIDR_EL0;
             WriteMrsHandler(offset + sizeof(u32), oaknut::XReg{static_cast<int>(mrs.GetRt())}, src_reg);
-        } else if (auto msr = MSR{words[i]}; msr.Verify() && msr.GetSystemReg() == TpidrEl0) {
+        } else if (auto msr = MSR{instruction}; msr.Verify() && msr.GetSystemReg() == TpidrEl0) {
             BranchToPatch(offset);
             WriteMsrHandler(offset + sizeof(u32), oaknut::XReg{static_cast<int>(msr.GetRt())});
         }
@@ -114,6 +116,9 @@ bool Patcher::PatchNx2Instruction(u32 instruction, uintptr_t offset, bool pre) {
 bool Patcher::PatchText(std::span<const u8> program_image, const Kernel::CodeSet::Segment& code) {
     // If we have patched modules but cannot reach the new module, then it needs its own patcher.
     const size_t image_size = program_image.size();
+    if (!IsValidCodeRange(image_size, code.offset, code.size)) {
+        return false;
+    }
 
     // Check if we need split mode for large modules. A64 max takes 128MB
     // tests showed that, with update, some are larger. (In this case 208MB)
@@ -142,12 +147,11 @@ bool Patcher::PatchText(std::span<const u8> program_image, const Kernel::CodeSet
 
     // Retrieve text segment data.
     const auto text = std::span{program_image}.subspan(code.offset, code.size);
-    const auto text_words =
-        std::span<const u32>{reinterpret_cast<const u32*>(text.data()), text.size() / sizeof(u32)};
+    const size_t word_count = text.size() / sizeof(u32);
 
     // Loop through instructions, patching as needed.
-    for (u32 i = ModuleCodeIndex; i < static_cast<u32>(text_words.size()); i++) {
-        const u32 inst = text_words[i];
+    for (size_t i = ModuleCodeIndex; i < word_count; i++) {
+        const u32 inst = ReadCodeWord(text, i);
         const uintptr_t instruction_offset = i * sizeof(u32);
         if (m_is_nx2 && PatchNx2Instruction(inst, instruction_offset,
                                            use_split && instruction_offset < image_size / 2)) {

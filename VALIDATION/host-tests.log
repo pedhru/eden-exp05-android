@@ -1,0 +1,6 @@
+PASS code_reader
+PASS memory_budget
+NCE filter: 2204288 differential checks passed
+PASS nce_filter
+Shader pool: reuse, boundaries, growth, destructors, no-allocation cleanup and threads passed
+PASS pool_cleanup

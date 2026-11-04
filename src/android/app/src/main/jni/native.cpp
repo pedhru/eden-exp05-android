@@ -1177,21 +1177,26 @@ constexpr u32 VENDOR_QUALCOMM = 0x5143;
 constexpr u32 VENDOR_ARM = 0x13B5;
 
 VkPhysicalDeviceProperties GetVulkanDeviceProperties() {
-    Common::DynamicLibrary library;
-    if (!library.Open("libvulkan.so")) {
+    try {
+        Common::DynamicLibrary library;
+        if (!library.Open("libvulkan.so")) {
+            return {};
+        }
+
+        Vulkan::vk::InstanceDispatch dld;
+        // TODO: warn the user that Vulkan is unavailable rather than hard crash
+        const auto instance = Vulkan::CreateInstance(library, dld, VK_API_VERSION_1_1);
+        const auto physical_devices = instance.EnumeratePhysicalDevices();
+        if (physical_devices.empty()) {
+            return {};
+        }
+
+        const Vulkan::vk::PhysicalDevice physical_device(physical_devices[0], dld);
+        return physical_device.GetProperties();
+    } catch (const std::exception& error) {
+        LOG_ERROR(Frontend, "Vulkan device properties unavailable: {}", error.what());
         return {};
     }
-
-    Vulkan::vk::InstanceDispatch dld;
-    // TODO: warn the user that Vulkan is unavailable rather than hard crash
-    const auto instance = Vulkan::CreateInstance(library, dld, VK_API_VERSION_1_1);
-    const auto physical_devices = instance.EnumeratePhysicalDevices();
-    if (physical_devices.empty()) {
-        return {};
-    }
-
-    const Vulkan::vk::PhysicalDevice physical_device(physical_devices[0], dld);
-    return physical_device.GetProperties();
 }
 
 bool GetFrameGenerationSupport() {
@@ -1405,7 +1410,7 @@ void Java_org_yuzu_yuzu_1emu_NativeLibrary_run(JNIEnv* env, jobject jobj, jstrin
 }
 
 void Java_org_yuzu_yuzu_1emu_NativeLibrary_logDeviceInfo(JNIEnv* env, jclass clazz) {
-    LOG_INFO(Frontend, "Android port build: nx2-nce-exp04-sx2a-0.3.0");
+    LOG_INFO(Frontend, "Android port build: nx2-nce-exp06-sx2a-0.3.0");
     LOG_INFO(Frontend, "eden Version: {}-{}", Common::g_scm_branch, Common::g_scm_desc);
     LOG_INFO(Frontend, "Host OS: Android API level {}", android_get_device_api_level());
 }
@@ -1997,7 +2002,7 @@ JNIEXPORT jobject JNICALL Java_org_yuzu_yuzu_1emu_NativeLibrary_checkForUpdate(
 JNIEXPORT jstring JNICALL Java_org_yuzu_yuzu_1emu_NativeLibrary_getBuildVersion(
         JNIEnv* env,
         [[maybe_unused]] jobject obj) {
-    return env->NewStringUTF("nx2-nce-exp04-sx2a-0.3.0");
+    return env->NewStringUTF("nx2-nce-exp06-sx2a-0.3.0");
 }
 
 JNIEXPORT jobjectArray JNICALL Java_org_yuzu_yuzu_1emu_NativeLibrary_getAllUsers(

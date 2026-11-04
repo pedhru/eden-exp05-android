@@ -109,8 +109,7 @@ namespace Vulkan {
 
         /// A sparse resident image with nothing bound (reads return zero, writes are dropped), or
         /// a null image when the device can't make one.
-        /// aliased: its sparse blocks may share memory (VK_IMAGE_CREATE_SPARSE_ALIASED_BIT).
-        vk::Image CreateUnbackedImage(const VkImageCreateInfo &ci, bool aliased = false) const;
+        vk::Image CreateUnbackedImage(const VkImageCreateInfo &ci) const;
 
         /// Device memory to bind to part of a sparse resource. Null when there is none left.
         VmaAllocation AllocateSparseMemory(const VkMemoryRequirements &requirements,

@@ -122,9 +122,6 @@ public:
         }
     }
 
-    void MapSparseTile(u64 gpu_address, u64 cpu_address, u64 size) {
-        BackSparse(gpu_address, cpu_address, size);
-    }
     void AddListener(const void* owner, Listener listener, UnmapListener unmap_listener,
                      ReleaseListener release_listener = {}, SparseListener sparse_listener = {},
                      BackListener back_listener = {}) {

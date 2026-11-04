@@ -97,6 +97,12 @@ using VideoCommon::GraphicsEnvironment;
 using VideoCommon::ShaderInfo;
 
 struct ShaderPools {
+    void ReleaseExtraChunks() noexcept {
+        flow_block.ReleaseExtraChunks();
+        block.ReleaseExtraChunks();
+        inst.ReleaseExtraChunks();
+    }
+
     void ReleaseContents() {
         flow_block.ReleaseContents();
         block.ReleaseContents();

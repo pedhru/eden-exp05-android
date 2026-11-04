@@ -15,4 +15,4 @@ source_dir="$(cd "$(dirname "$0")/../.." && pwd)"
   -DBUILD_TESTING=OFF -DYUZU_TESTS=OFF -DDYNARMIC_TESTS=OFF \
   -DENABLE_WERROR=OFF -DENABLE_UPDATE_CHECKER=OFF -DENABLE_LTO=OFF \
   -DYUZU_DOWNLOAD_ANDROID_VVL=OFF -DEDEN_NX2_NO_ENV_FILE=ON
-"$cmake_dir/bin/cmake" --build "$build_dir/build" --target yuzu-android --parallel 4
+"$cmake_dir/bin/cmake" --build "$build_dir/build" --target yuzu-android --parallel "${BUILD_JOBS:-2}"

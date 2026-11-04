@@ -249,7 +249,10 @@ static bool LoadNroImpl(Core::System& system, Kernel::KProcess& process,
 
     if (Settings::IsNceEnabled()) {
         // Patch SVCs and MRS calls in the guest code
-        patch.PatchText(program_image, code);
+        if (!patch.PatchText(program_image, code)) {
+            LOG_ERROR(Loader, "NCE patching failed for NRO code segment");
+            return false;
+        }
 
         // We only support PostData patching for NROs.
         ASSERT(patch.GetPatchMode() == Core::NCE::PatchMode::PostData);

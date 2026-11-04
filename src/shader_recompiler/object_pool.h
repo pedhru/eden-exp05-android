@@ -6,6 +6,7 @@
 #include <memory>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace Shader {
 
@@ -28,7 +29,7 @@ public:
             return;
         }
         Chunk& root{chunks.front()};
-        if (root.used_objects == root.num_objects) {
+        if (chunks.size() > 1) {
             // Root chunk has been filled, squash allocations into it
             const size_t total_objects{root.num_objects + new_chunk_size * (chunks.size() - 1)};
             chunks.clear();
@@ -38,6 +39,16 @@ public:
             chunks.resize(1);
         }
         chunks.shrink_to_fit();
+        node = &chunks.front();
+    }
+
+    // Reuse the initial allocation without retaining peak shader memory.
+    void ReleaseExtraChunks() noexcept {
+        if (chunks.empty()) {
+            return;
+        }
+        chunks.front().Release();
+        chunks.resize(1);
         node = &chunks.front();
     }
 

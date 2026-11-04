@@ -173,14 +173,9 @@ void GPULogger::LogVulkanCall(const std::string& call_name, const std::string& p
         return;
     }
 
-    // Only log all calls in Verbose or All mode
-    if (current_level != LogLevel::Verbose && current_level != LogLevel::All) {
-        // In Standard mode, only log important calls
-        if (call_name.find("vkCmd") == std::string::npos &&
-            call_name.find("vkCreate") == std::string::npos &&
-            call_name.find("vkDestroy") == std::string::npos) {
-            return;
-        }
+    // Preserve failures while keeping routine call tracing opt-in on mobile.
+    if (current_level != LogLevel::Verbose && current_level != LogLevel::All && result == 0) {
+        return;
     }
 
     const auto timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
