@@ -65,11 +65,11 @@ jobs:
             externals/generated/sdl/java/
           test -f externals/generated/sdl/java/org/libsdl/app/SDL.java
 
-      - name: Build EXP05 Mainline Debug
+      - name: Build EXP07 Mainline Release
         working-directory: src/android
         run: |
           chmod +x gradlew
-          ./gradlew copyMainlineDebugOutputs \
+          ./gradlew assembleMainlineRelease \
             --no-daemon \
             --max-workers=2 \
             --console=plain
@@ -78,7 +78,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Eden-EXP05-Android
+          name: Eden-EXP07-Mainline-Release
           path: |
             artifacts/
             src/android/app/build/outputs/apk/
