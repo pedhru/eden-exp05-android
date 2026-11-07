@@ -49,6 +49,27 @@ jobs:
           keytool -delete -alias androiddebugkey -keystore src/android/app/debug.keystore -storepass android >/dev/null 2>&1 || true
           keytool -genkeypair -noprompt -keystore src/android/app/debug.keystore -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname "CN=Android Debug,O=Android,C=US"
 
+      - name: Prepare SDL3 Java sources
+        run: |
+          python3 - <<'PYSDL'
+          import json
+          import pathlib
+          import shutil
+          import urllib.request
+          import zipfile
+
+          root = pathlib.Path.cwd()
+          package = root / "externals" / "sdl3-ci.json"
+          if not package.exists():
+              matches = list((root / "externals").glob("*sdl3*.json"))
+              if not matches:
+                  raise SystemExit("ERRO: manifesto SDL3 não encontrado")
+              package = matches[0]
+
+          print("Manifesto SDL3:", package)
+          print(package.read_text()[:4000])
+          PYSDL
+
       - name: Build EXP05 Mainline Debug
         working-directory: src/android
         run: |
