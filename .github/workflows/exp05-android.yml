@@ -51,24 +51,19 @@ jobs:
 
       - name: Prepare SDL3 Java sources
         run: |
-          python3 - <<'PYSDL'
-          import json
-          import pathlib
-          import shutil
-          import urllib.request
-          import zipfile
-
-          root = pathlib.Path.cwd()
-          package = root / "externals" / "sdl3-ci.json"
-          if not package.exists():
-              matches = list((root / "externals").glob("*sdl3*.json"))
-              if not matches:
-                  raise SystemExit("ERRO: manifesto SDL3 não encontrado")
-              package = matches[0]
-
-          print("Manifesto SDL3:", package)
-          print(package.read_text()[:4000])
-          PYSDL
+          set -e
+          SDL_VERSION=3.2.28
+          curl -fL --retry 3 -o /tmp/SDL3.tar.gz \
+            "https://github.com/libsdl-org/SDL/releases/download/release-${SDL_VERSION}/SDL3-${SDL_VERSION}.tar.gz"
+          mkdir -p externals/generated/sdl/java
+          tar -xzf /tmp/SDL3.tar.gz -C /tmp
+          test -f "/tmp/SDL3-${SDL_VERSION}/android-project/app/src/main/java/org/libsdl/app/SDL.java" || {
+            echo "ERRO: SDL.java não encontrado na versão selecionada"
+            exit 1
+          }
+          cp -R "/tmp/SDL3-${SDL_VERSION}/android-project/app/src/main/java/." \
+            externals/generated/sdl/java/
+          test -f externals/generated/sdl/java/org/libsdl/app/SDL.java
 
       - name: Build EXP05 Mainline Debug
         working-directory: src/android
