@@ -1027,12 +1027,6 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
     std::tie(load_global_func_u32x4, write_global_func_u32x4) =
         define(&StorageDefinitions::U32x4, storage_types.U32x4, U32[4], sizeof(u32[4]));
 
-    if (!info.native_global_bounds &&
-        !std::ranges::any_of(info.nvn_buffer_used, [](bool used) {
-            return used;
-        })) {
-        return;
-    }
     for (const auto opcode : {IR::Opcode::GlobalAtomicIAdd32, IR::Opcode::GlobalAtomicUMax32}) {
         if (!std::ranges::any_of(program.blocks, [opcode](const IR::Block* block) {
                 return std::ranges::any_of(block->Instructions(), [opcode](const IR::Inst& inst) {
