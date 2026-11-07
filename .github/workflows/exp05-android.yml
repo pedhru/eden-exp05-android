@@ -1,4 +1,4 @@
-name: Eden EXP05 Android
+name: Eden EXP08 Android
 
 on:
   workflow_dispatch:
@@ -65,7 +65,13 @@ jobs:
             externals/generated/sdl/java/
           test -f externals/generated/sdl/java/org/libsdl/app/SDL.java
 
-      - name: Build EXP07 Mainline Release
+      - name: Run NX2 NCE and memory regression tests
+        run: |
+          sudo apt-get install -y g++
+          bash .ci/android/test-exp06-host.sh
+          python3 .ci/android/test-nx2-nce.py --clang clang
+
+      - name: Build EXP08 Mainline Release
         working-directory: src/android
         run: |
           chmod +x gradlew
@@ -78,7 +84,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Eden-EXP07-Mainline-Release
+          name: Eden-EXP08-Mainline-Release
           path: |
             artifacts/
             src/android/app/build/outputs/apk/
